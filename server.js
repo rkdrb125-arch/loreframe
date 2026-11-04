@@ -30,7 +30,70 @@ const pwHash = (p,s) => crypto.pbkdf2Sync(p,s,210000,32,'sha256').toString('hex'
 const encrypt = s => {let iv=crypto.randomBytes(12),c=crypto.createCipheriv('aes-256-gcm',encKey,iv),data=Buffer.concat([c.update(s,'utf8'),c.final()]);return Buffer.concat([iv,c.getAuthTag(),data]).toString('base64')};
 const decrypt = s => {let b=Buffer.from(s,'base64'),d=crypto.createDecipheriv('aes-256-gcm',encKey,b.subarray(0,12));d.setAuthTag(b.subarray(12,28));return Buffer.concat([d.update(b.subarray(28)),d.final()]).toString('utf8')};
 const models={gemini:'gemini-2.5-flash',openai:'gpt-4.1-mini',anthropic:'claude-sonnet-4-5',openrouter:'openai/gpt-4.1-mini'};
-async function inference(provider,key,model,messages){let url,headers={'Content-Type':'application/json'},body;let system=String(messages[0]?.content||''),user=String(messages[1]?.content||'');if(provider==='gemini'){url=`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;headers['x-goog-api-key']=key;body={systemInstruction:{parts:[{text:system}]},contents:[{role:'user',parts:[{text:user}]}],generationConfig:{temperature:.75,maxOutputTokens:3500}}}else if(provider==='anthropic'){url='https://api.anthropic.com/v1/messages';headers['x-api-key']=key;headers['anthropic-version']='2023-06-01';body={model,max_tokens:3500,system,messages:[{role:'user',content:user}]}}else{url=provider==='openrouter'?'https://openrouter.ai/api/v1/chat/completions':'https://api.openai.com/v1/chat/completions';headers.Authorization=`Bearer ${key}`;body={model,messages,temperature:.7}}let r=await fetch(url,{method:'POST',headers,body:JSON.stringify(body),signal:AbortSignal.timeout(60000)});let d=await r.json().catch(()=>({}));if(!r.ok)throw Error(`AI 제공업체 오류 ${r.status}: ${String(d.error?.message||d.message||'연결 설정을 확인하세요').slice(0,250)}`);return provider==='gemini'?(d.candidates?.[0]?.content?.parts||[]).map(x=>x.text||'').join(''):provider==='anthropic'?(d.content||[]).map(x=>x.text||'').join(''):d.choices?.[0]?.message?.content||''}
+// Gemini model discovery follows the working Miguel phone app's approach.
+const geminiModelsCache=new Map();
+async function discoverGeminiModels(key){
+  const hash=crypto.createHash('sha256').update(key).digest('hex');
+  const cached=geminiModelsCache.get(hash);
+  if(cached&&Date.now()-cached.at<10*60*1000)return cached.models;
+  const r=await fetch('https://generativelanguage.googleapis.com/v1beta/models?pageSize=100',{
+    headers:{'x-goog-api-key':key},signal:AbortSignal.timeout(12000)
+  });
+  const d=await r.json().catch(()=>({}));
+  if(!r.ok)throw Object.assign(new Error('Gemini 모델 목록 조회 실패 ('+r.status+'): '+String(d.error?.message||'API 키와 권한을 확인하세요').slice(0,180)),{status:r.status});
+  const list=(d.models||[]).filter(x=>(x.supportedGenerationMethods||[]).includes('generateContent'))
+    .map(x=>String(x.name||'').replace(/^models\//,''))
+    .filter(x=>/^gemini-/i.test(x)&&/flash/i.test(x)&&!/image|audio|tts|video|embedding|robotics|computer|live|native/i.test(x));
+  const result=[...new Set(list)];
+  geminiModelsCache.set(hash,{at:Date.now(),models:result});
+  return result;
+}
+async function inference(provider,key,model,messages){
+  const system=String(messages[0]?.content||''),user=String(messages[1]?.content||'');
+  const headers={'Content-Type':'application/json'};
+  if(provider==='gemini'){
+    headers['x-goog-api-key']=key;
+    const body={systemInstruction:{parts:[{text:system}]},contents:[{role:'user',parts:[{text:user}]}],generationConfig:{temperature:.75,maxOutputTokens:3500}};
+    let candidates=[model];
+    try{
+      const available=await discoverGeminiModels(key);
+      const alternates=available.filter(x=>x!==model&&!/preview|experimental|exp/i.test(x));
+      candidates=[...new Set([model,...alternates])].slice(0,4);
+    }catch(e){console.warn('Gemini model discovery unavailable:',e.message)}
+    let lastError;
+    for(let i=0;i<candidates.length;i++){
+      const chosen=candidates[i];
+      const url='https://generativelanguage.googleapis.com/v1beta/models/'+encodeURIComponent(chosen)+':generateContent';
+      const r=await fetch(url,{method:'POST',headers,body:JSON.stringify(body),signal:AbortSignal.timeout(60000)});
+      const d=await r.json().catch(()=>({}));
+      if(r.ok){
+        const result=(d.candidates?.[0]?.content?.parts||[]).map(x=>x.text||'').join('');
+        if(!result)throw Object.assign(new Error('Gemini가 빈 응답을 반환했습니다.'),{status:502});
+        return {text:result,modelUsed:chosen};
+      }
+      const msg=String(d.error?.message||d.message||'요청을 처리하지 못했습니다.').slice(0,220);
+      lastError=Object.assign(new Error('Gemini '+chosen+' ('+r.status+'): '+msg),{status:r.status});
+      // Retry another model only for temporary overload or model unavailability.
+      // Never retry quota, permission, invalid-key or other errors automatically.
+      if(![404,503].includes(r.status)||i===candidates.length-1)break;
+      await new Promise(resolve=>setTimeout(resolve,400*(i+1)));
+    }
+    throw lastError;
+  }
+  let url,body;
+  if(provider==='anthropic'){
+    url='https://api.anthropic.com/v1/messages';headers['x-api-key']=key;headers['anthropic-version']='2023-06-01';
+    body={model,max_tokens:3500,system,messages:[{role:'user',content:user}]};
+  }else{
+    url=provider==='openrouter'?'https://openrouter.ai/api/v1/chat/completions':'https://api.openai.com/v1/chat/completions';
+    headers.Authorization='Bearer '+key;body={model,messages,temperature:.7};
+  }
+  const r=await fetch(url,{method:'POST',headers,body:JSON.stringify(body),signal:AbortSignal.timeout(60000)});
+  const d=await r.json().catch(()=>({}));
+  if(!r.ok)throw Object.assign(new Error('AI 제공업체 오류 '+r.status+': '+String(d.error?.message||d.message||'연결 설정을 확인하세요').slice(0,220)),{status:r.status});
+  const result=provider==='anthropic'?(d.content||[]).map(x=>x.text||'').join(''):d.choices?.[0]?.message?.content||'';
+  return {text:result,modelUsed:model};
+}
 
 const rate=new Map();
 async function login(res,id) {
@@ -136,6 +199,12 @@ if(p==='/admin'&&method==='GET'){
     await query('INSERT INTO documents(user_id,body,updated_at) VALUES($1,$2,$3) ON CONFLICT(user_id) DO UPDATE SET body=EXCLUDED.body,updated_at=EXCLUDED.updated_at',[user.id,content,Date.now()]);
     return json(res,200,{ok:true});
   }
+  if(p==='/api/gemini/models'&&method==='GET'){
+    const row=await one('SELECT model,key_cipher FROM providers WHERE user_id=$1 AND provider=$2',[user.id,'gemini']);
+    if(!row)return json(res,400,{error:'Gemini API 키를 먼저 저장해 주세요.'});
+    try{return json(res,200,{models:await discoverGeminiModels(decrypt(row.key_cipher)),selected:row.model})}
+    catch(e){return json(res,e.status===403?403:502,{error:e.message})}
+  }
   if(p==='/api/providers'&&method==='GET')return json(res,200,{providers:(await query('SELECT provider,model FROM providers WHERE user_id=$1',[user.id])).rows});
   if(p==='/api/providers'&&method==='POST'){
     const b=await parse(req),provider=String(b.provider||''),model=String(b.model||'').trim(),key=String(b.key||'').trim();
@@ -156,8 +225,14 @@ if(p==='/admin'&&method==='GET'){
     if(!row)return json(res,400,{error:'먼저 AI 연결 설정에서 API 키를 저장하세요.'});
     const messages=b.messages;
     if(!Array.isArray(messages)||messages.length!==2||messages.some(x=>typeof x.content!=='string'||x.content.length>30000))return json(res,400,{error:'분석 요청 형식이 올바르지 않습니다.'});
-    const result=await inference(provider,decrypt(row.key_cipher),row.model,messages);
-    return json(res,200,{text:result});
+    try{
+      const result=await inference(provider,decrypt(row.key_cipher),row.model,messages);
+      return json(res,200,result);
+    }catch(e){
+      console.error('AI request failed:',e.message);
+      const status=[400,401,403,404,429,503].includes(e.status)?e.status:502;
+      return json(res,status,{error:e.message});
+    }
   }
   return json(res,404,{error:'지원하지 않는 요청입니다.'});
 }catch(e){console.error(e);if(!res.headersSent)return json(res,500,{error:e.message==='요청 크기 제한 초과'?e.message:'요청 처리 중 오류가 발생했습니다. 서버 로그를 확인하세요.'});res.end()}});
