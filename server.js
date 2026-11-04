@@ -12,7 +12,7 @@ if (!process.env.DATABASE_URL) throw Error('DATABASE_URL is required');
 const encKey = crypto.createHash('sha256').update(secret).digest();
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: true },
+  ssl: { rejectUnauthorized: false }, // TEMPORARY: TLS encrypted, certificate verification disabled; configure trusted CA before public launch
   max: 5,
   connectionTimeoutMillis: 10000,
   idleTimeoutMillis: 30000
