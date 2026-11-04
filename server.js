@@ -36,7 +36,13 @@ let u=new URL(req.url,'http://localhost'),p=u.pathname,method=req.method;
 if(p==='/healthz'&&method==='GET')return json(res,200,{ok:true});
 if(['POST','PUT','DELETE','PATCH'].includes(method)){let origin=req.headers.origin;let host=req.headers['x-forwarded-host']||req.headers.host;let proto=req.headers['x-forwarded-proto']||'http';if(origin){let expected=process.env.PUBLIC_ORIGIN||`${proto}://${host}`;if(origin!==expected)return json(res,403,{error:'허용되지 않은 출처입니다.'});}}
 if(p==='/'&&method==='GET'){res.writeHead(200,{'Content-Type':'text/html; charset=utf-8','Cache-Control':'no-store'});return fs.createReadStream(path.join(__dirname,'index.html')).pipe(res)}
-if(!p.startsWith('/api/'))return json(res,404,{error:'찾을 수 없습니다'});
+if (
+  !p.startsWith('/api/') &&
+  p !== '/admin-setup' &&
+  p !== '/admin'
+) {
+  return json(res, 404, { error: '찾을 수 없습니다' });
+}
 if(p==='/api/me'&&method==='GET')return json(res,200,{user:getUser(req)});
 // One-time administrator enrollment. The setup key is never returned to the browser.
 if(p==='/admin-setup'&&method==='GET'){
