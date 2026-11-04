@@ -1,8 +1,9 @@
+
 services:
   - type: web
     name: loreframe
     runtime: node
-    plan: starter
+    plan: free
     buildCommand: npm install
     startCommand: npm start
     healthCheckPath: /healthz
@@ -12,8 +13,4 @@ services:
       - key: APP_SECRET
         generateValue: true
       - key: DB_PATH
-        value: /var/data/loreframe.sqlite
-    disk:
-      name: loreframe-data
-      mountPath: /var/data
-      sizeGB: 1
+        value: /tmp/loreframe.sqlite
