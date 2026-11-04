@@ -12,7 +12,7 @@ if (!process.env.DATABASE_URL) throw Error('DATABASE_URL is required');
 const encKey = crypto.createHash('sha256').update(secret).digest();
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }, // TEMPORARY: TLS encrypted, certificate verification disabled; configure trusted CA before public launch
+  ssl: { ca: fs.readFileSync(path.join(__dirname, 'prod-ca-2021.crt'), 'utf8'), rejectUnauthorized: true }, // Verify Supabase TLS certificate against its trusted root CA
   max: 5,
   connectionTimeoutMillis: 10000,
   idleTimeoutMillis: 30000
