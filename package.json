@@ -1,0 +1,7 @@
+{
+  "name": "loreframe-web-service",
+  "version": "7.0.0",
+  "private": true,
+  "engines": {"node": ">=22.13.0"},
+  "scripts": {"start": "node server.js", "check": "node --check server.js"}
+}
